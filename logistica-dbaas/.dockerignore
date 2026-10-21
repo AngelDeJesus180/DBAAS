@@ -1,0 +1,8 @@
+venv/
+venv311/
+.env
+backups/
+evidencias/
+.ipynb_checkpoints/
+__pycache__/
+estado/

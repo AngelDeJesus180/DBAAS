@@ -1,0 +1,123 @@
+# =====================================================================
+#  Prototipo que SIMULA lo que un DBaaS (RDS Multi-AZ / Cloud SQL HA)
+#  hace por nosotros:
+#    db-primario  -> recibe escrituras            (≈ instancia primaria, zona A)
+#    db-replica   -> copia por replicación GTID   (≈ réplica / standby, zona B)
+#    replica-setup-> conecta la réplica al primario (lo que el proveedor automatiza)
+#    jupyter      -> la "aplicación" que ejecuta las pruebas
+#
+#  OJO: todo corre en UNA sola máquina. Sirve para demostrar replicación,
+#  caída de un nodo y restauración, pero NO tolera que se caiga el PC.
+# =====================================================================
+
+x-mysql-comun: &mysql-comun
+  image: mysql:8.0
+  environment:
+    MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-RootDemo#2026}
+    MYSQL_INITDB_SKIP_TZINFO: "1"
+    TZ: America/Bogota
+  healthcheck:
+    # Se usa TCP (127.0.0.1) a propósito: durante la inicialización MySQL
+    # arranca sin red, así el contenedor solo queda "healthy" cuando terminó.
+    test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+    interval: 5s
+    timeout: 5s
+    retries: 30
+    start_period: 20s
+
+services:
+  db-primario:
+    <<: *mysql-comun
+    container_name: logistica-db-primario
+    command:
+      - --server-id=1
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    ports:
+      - "3307:3306"           # desde Windows: localhost:3307
+    volumes:
+      - datos_primario:/var/lib/mysql
+      - ./sql/primario:/docker-entrypoint-initdb.d:ro   # esquema + datos + usuarios
+      - ./scripts:/scripts:ro
+      - ./backups:/backups
+
+  db-replica:
+    <<: *mysql-comun
+    container_name: logistica-db-replica
+    command:
+      - --server-id=2
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --log-replica-updates=ON
+      - --relay-log=relay-bin
+    ports:
+      - "3308:3306"           # desde Windows: localhost:3308
+    volumes:
+      - datos_replica:/var/lib/mysql
+      - ./scripts:/scripts:ro
+
+  replica-setup:
+    image: mysql:8.0
+    container_name: logistica-replica-setup
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-RootDemo#2026}
+      REPL_PASSWORD: ${REPL_PASSWORD:-ReplDemo#2026}
+    entrypoint: ["bash", "/scripts/configurar_replica.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    depends_on:
+      db-primario:
+        condition: service_healthy
+      db-replica:
+        condition: service_healthy
+    restart: "no"
+
+  jupyter:
+    build: .
+    container_name: logistica-jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      DB_PRIMARIO_HOST: db-primario
+      DB_REPLICA_HOST: db-replica
+      DB_PORT: "3306"
+      DB_NAME: logistica
+      DB_APP_USER: app_logistica
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:-AppDemo#2026}
+      DB_REPORTES_USER: app_reportes
+      DB_REPORTES_PASSWORD: ${DB_REPORTES_PASSWORD:-ReportesDemo#2026}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-RootDemo#2026}
+      TZ: America/Bogota
+    volumes:
+      - .:/app
+    depends_on:
+      replica-setup:
+        condition: service_completed_successfully
+
+  # Failover AUTOMÁTICO (opcional): docker compose --profile auto up -d --build
+  vigilante:
+    build: .
+    container_name: logistica-vigilante
+    profiles: ["auto"]
+    command: ["python", "src/vigilante.py"]
+    environment:
+      DB_PRIMARIO_HOST: db-primario
+      DB_REPLICA_HOST: db-replica
+      DB_PORT: "3306"
+      DB_NAME: logistica
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-RootDemo#2026}
+      TZ: America/Bogota
+    volumes:
+      - .:/app
+    depends_on:
+      replica-setup:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  datos_primario:
+  datos_replica:

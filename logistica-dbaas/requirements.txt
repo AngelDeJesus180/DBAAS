@@ -1,0 +1,4 @@
+pymysql==1.1.1
+cryptography==43.0.3
+pandas==2.2.3
+jupyterlab==4.2.5
